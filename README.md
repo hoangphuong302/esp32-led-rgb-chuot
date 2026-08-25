@@ -19,6 +19,11 @@ Firmware ESPHome độc lập cho LED RGB chuột BLE của Nhà Sam. Thiết b�
 - Màu: `56 RR GG BB 00 F0 AA`
 - Hỏi trạng thái: `EF 01 77`
 
+Firmware chỉ bật scanner/kết nối BLE khi có lệnh đang chờ. Sau khi LED trả
+notify đúng trạng thái, bo ACK lệnh về Nhà Sam, ngắt BLE và trả radio cho Wi-Fi.
+Kênh trắng nhận giá trị `0..255` trong gói lệnh nhưng controller báo lại theo
+thang `0..63`; firmware chuẩn hóa thang này trước khi ACK.
+
 Lệnh chỉ được ACK về server sau khi LED trả gói trạng thái hợp lệ và trạng thái nguồn khớp. Lệnh màu luôn gửi gói bật trước để tương thích với controller Triones clone.
 
 ## Build / nạp lần đầu

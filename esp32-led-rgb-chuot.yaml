@@ -11,6 +11,16 @@ esphome:
   # PlatformIO rejects the desktop workspace because its Windows path contains
   # spaces. Keep generated artifacts in a stable path; source stays in Git.
   build_path: C:/Workspace/esphome-build/esp32-led-rgb-chuot
+  on_boot:
+    priority: -10
+    then:
+      # Give the tracker a short discovery window so ESPHome learns the
+      # controller's static-random address type, then release the radio for
+      # Wi-Fi. BLE is started again only when a real LED command is pending.
+      - delay: 4s
+      - lambda: |-
+          id(ble_tracker)->stop_scan();
+          id(g_ble_busy) = false;
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -37,7 +47,7 @@ api:
             if (packet.size() == 3 || packet.size() == 7) {
               id(g_pending_command) = packet;
               id(g_pending_id) = "local-api";
-              id(send_pending_command).execute();
+              id(start_ble_transaction).execute();
             }
 
 ota:
@@ -90,19 +100,27 @@ esp32_ble_tracker:
 ble_client:
   - mac_address: ${led_mac}
     id: led_strip
-    auto_connect: true
+    auto_connect: false
     on_connect:
       then:
+        # Once GATT is established the scanner is unnecessary. Leaving the
+        # continuous scan active filled ESPHome's BLE event ring while HTTPS
+        # was running, which delayed polling and could drop notifications.
+        - lambda: id(ble_tracker)->stop_scan();
         - lambda: |-
             id(g_ble_connected) = true;
             ESP_LOGI("mouse_led", "Connected to ${led_mac}; GATT is warm");
-        - script.execute: request_led_status
+        # ESPHome dispatches the connect trigger before every BLE write node
+        # has observed SEARCH_CMPL. A short settling delay avoids a false
+        # "not connected" first write and removes the former 4-10s retry.
+        - delay: 250ms
         - script.execute: send_pending_command
     on_disconnect:
       then:
         - lambda: |-
             id(g_ble_connected) = false;
-            ESP_LOGW("mouse_led", "Disconnected; automatic reconnect remains enabled");
+            id(ble_tracker)->stop_scan();
+            ESP_LOGI("mouse_led", "Disconnected; Wi-Fi polling resumed");
 
 text_sensor:
   - platform: ble_client
@@ -120,13 +138,21 @@ text_sensor:
             const uint8_t actual_power = (uint8_t) x[2];
             id(g_last_status_power) = actual_power;
             id(g_last_status_ms) = millis();
-            ESP_LOGI("mouse_led", "Status confirmed: power=0x%02X rgb=%u,%u,%u",
-                     actual_power, (uint8_t) x[6], (uint8_t) x[7], (uint8_t) x[8]);
-            if (!id(g_pending_id).empty() && actual_power == id(g_expected_power)) {
+            const uint8_t actual_r = (uint8_t) x[6];
+            const uint8_t actual_g = (uint8_t) x[7];
+            const uint8_t actual_b = (uint8_t) x[8];
+            const uint8_t actual_w = (uint8_t) x[9];
+            ESP_LOGI("mouse_led", "Status confirmed: power=0x%02X rgbw=%u,%u,%u,%u",
+                     actual_power, actual_r, actual_g, actual_b, actual_w);
+            const bool payload_matches = !id(g_expected_has_color) ||
+              (actual_r == id(g_expected_r) && actual_g == id(g_expected_g) &&
+               actual_b == id(g_expected_b) && actual_w == id(g_expected_w));
+            if (!id(g_pending_id).empty() && actual_power == id(g_expected_power) && payload_matches) {
               id(g_ack_json) = "[\"" + id(g_pending_id) + "\"]";
               id(g_last_confirmed_id) = id(g_pending_id);
               id(g_pending_id).clear();
               id(g_pending_command).clear();
+              id(finish_ble_transaction).execute();
             }
 
 binary_sensor:
@@ -148,6 +174,14 @@ globals:
     type: bool
     restore_value: false
     initial_value: "false"
+  - id: g_ble_busy
+    type: bool
+    restore_value: false
+    initial_value: "true"
+  - id: g_ble_started_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
   - id: g_pending_command
     type: std::vector<uint8_t>
     restore_value: false
@@ -167,6 +201,11 @@ globals:
     type: uint8_t
     restore_value: false
     initial_value: "0x23"
+  - { id: g_expected_has_color, type: bool, restore_value: false, initial_value: "false" }
+  - { id: g_expected_r, type: uint8_t, restore_value: false, initial_value: "0" }
+  - { id: g_expected_g, type: uint8_t, restore_value: false, initial_value: "0" }
+  - { id: g_expected_b, type: uint8_t, restore_value: false, initial_value: "0" }
+  - { id: g_expected_w, type: uint8_t, restore_value: false, initial_value: "0" }
   - id: g_last_status_power
     type: uint8_t
     restore_value: false
@@ -177,6 +216,34 @@ globals:
     initial_value: "0"
 
 script:
+  - id: start_ble_transaction
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: return !id(g_ble_busy) && !id(g_pending_command).empty();
+          then:
+            - lambda: |-
+                id(g_ble_busy) = true;
+                id(g_ble_started_ms) = millis();
+                ESP_LOGI("mouse_led", "Starting on-demand BLE transaction");
+            - lambda: id(ble_tracker)->start_scan();
+            - delay: 200ms
+            - ble_client.connect:
+                id: led_strip
+
+  - id: finish_ble_transaction
+    mode: restart
+    then:
+      - delay: 250ms
+      - ble_client.disconnect:
+          id: led_strip
+      - lambda: |-
+          id(ble_tracker)->stop_scan();
+          id(g_ble_connected) = false;
+          id(g_ble_busy) = false;
+          id(g_ble_started_ms) = 0;
+
   - id: request_led_status
     mode: restart
     then:
@@ -210,6 +277,15 @@ script:
             - lambda: |-
                 id(g_expected_power) =
                   (id(g_pending_command).size() == 3 && id(g_pending_command)[1] == 0x24) ? 0x24 : 0x23;
+                id(g_expected_has_color) = id(g_pending_command).size() == 7;
+                if (id(g_expected_has_color)) {
+                  id(g_expected_r) = id(g_pending_command)[1];
+                  id(g_expected_g) = id(g_pending_command)[2];
+                  id(g_expected_b) = id(g_pending_command)[3];
+                  // This controller accepts white on a 0..255 command scale,
+                  // but reports it back on a 0..63 status scale.
+                  id(g_expected_w) = id(g_pending_command)[4] >> 2;
+                }
             - ble_client.ble_write:
                 id: led_strip
                 service_uuid: "FFE5"
@@ -239,7 +315,7 @@ script:
             if (packet.size() != 3 && packet.size() != 7) continue;
             id(g_pending_id) = command_id;
             id(g_pending_command) = packet;
-            id(send_pending_command).execute();
+            id(start_ble_transaction).execute();
           }
 
 interval:
@@ -247,7 +323,9 @@ interval:
     then:
       - if:
           condition:
-            wifi.connected:
+            and:
+              - wifi.connected:
+              - lambda: return !id(g_ble_busy);
           then:
             - http_request.post:
                 url: ${aura_push_url}
@@ -274,10 +352,17 @@ interval:
                           - script.execute:
                               id: parse_server_response
                               body: !lambda return body;
-  - interval: 10s
+  - interval: 2s
     then:
       - if:
           condition:
-            lambda: return id(g_ble_connected) && !id(g_pending_id).empty();
+            lambda: |-
+              return id(g_ble_busy) && id(g_ble_started_ms) != 0 &&
+                     millis() - id(g_ble_started_ms) > 15000;
           then:
-            - script.execute: send_pending_command
+            - lambda: |-
+                ESP_LOGW("mouse_led", "BLE transaction timed out; returning radio to Wi-Fi");
+                id(led_strip)->disconnect();
+                id(ble_tracker)->stop_scan();
+                id(g_ble_busy) = false;
+                id(g_ble_started_ms) = 0;
