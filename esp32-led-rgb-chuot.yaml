@@ -11,12 +11,6 @@ esphome:
   # PlatformIO rejects the desktop workspace because its Windows path contains
   # spaces. Keep generated artifacts in a stable path; source stays in Git.
   build_path: C:/Workspace/esphome-build/esp32-led-rgb-chuot
-  on_boot:
-    priority: -10
-    then:
-      - lambda: |-
-          id(led_strip)->set_auto_connect(true);
-          id(ble_tracker)->start_scan();
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -85,8 +79,11 @@ http_request:
 esp32_ble_tracker:
   id: ble_tracker
   scan_parameters:
-    interval: 320ms
-    window: 80ms
+    # Values proven on the existing ESP32-C3 room controllers. The former
+    # duplicate on_boot start plus a wide scan window caused overlapping OPEN
+    # attempts and GATT status 133.
+    interval: 100ms
+    window: 40ms
     active: true
     continuous: true
 
@@ -246,7 +243,7 @@ script:
           }
 
 interval:
-  - interval: 1s
+  - interval: 3s
     then:
       - if:
           condition:
