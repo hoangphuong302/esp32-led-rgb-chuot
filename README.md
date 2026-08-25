@@ -7,6 +7,8 @@ Firmware ESPHome độc lập cho LED RGB chuột BLE của Nhà Sam. Thiết b�
 - Board: ESP32-C3 4 MB
 - MAC Wi-Fi: `70:AF:09:3A:EB:F0`
 - LED BLE MAC: `FF:FF:DE:0D:04:AF`
+- ESP32-C3 Wi-Fi/USB MAC: `70:AF:09:3A:EB:F0` (dùng MAC để nhận diện,
+  không suy đoán theo IP DHCP)
 - GATT write: service `FFE5`, characteristic `FFE9`
 - GATT status notify: service `FFE0`, characteristic `FFE4`
 
@@ -24,5 +26,10 @@ Lệnh chỉ được ACK về server sau khi LED trả gói trạng thái hợp
 1. Sao chép `secrets.yaml.example` thành `secrets.yaml` và điền bí mật.
 2. Chạy `esphome run esp32-led-rgb-chuot.yaml --device COM3`.
 3. Các lần sau dùng `esphome run esp32-led-rgb-chuot.yaml --device esp32-led-rgb-chuot.local` hoặc IP đã đối chiếu với MAC.
+
+OTA qua Wi-Fi đã được kiểm chứng thực tế ngày 25/08/2026. Bo cần đặt gần bộ
+điều khiển LED; tại vị trí PC, RSSI của LED khoảng `-82 dBm`, đủ thấy quảng bá
+nhưng không đủ ổn định để duy trì GATT. Wi-Fi chỉ dùng để nhận lệnh từ Nhà Sam,
+vì vậy bo không cần đặt gần máy chủ hay ESP điều hòa.
 
 Không commit `secrets.yaml` hoặc file firmware nhị phân.
