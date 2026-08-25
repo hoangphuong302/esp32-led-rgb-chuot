@@ -1,0 +1,286 @@
+substitutions:
+  device_name: esp32-led-rgb-chuot
+  friendly_name: "ESP32 LED RGB chuột"
+  led_mac: "FF:FF:DE:0D:04:AF"
+  aura_push_url: "https://nhasam.id.vn/aura-api/esp-push"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  comment: "Dedicated Wi-Fi/BLE bridge for the Nhà Sam mouse RGB LED"
+  # PlatformIO rejects the desktop workspace because its Windows path contains
+  # spaces. Keep generated artifacts in a stable path; source stays in Git.
+  build_path: C:/Workspace/esphome-build/esp32-led-rgb-chuot
+  on_boot:
+    priority: -10
+    then:
+      - lambda: |-
+          id(led_strip)->set_auto_connect(true);
+          id(ble_tracker)->start_scan();
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: arduino
+
+logger:
+  level: INFO
+  logs:
+    esp32_ble_tracker: WARN
+    ble_client: INFO
+    http_request: WARN
+
+api:
+  reboot_timeout: 0s
+  services:
+    - service: send_led_packet
+      variables:
+        command: int[]
+      then:
+        - lambda: |-
+            std::vector<uint8_t> packet;
+            for (int value : command) packet.push_back((uint8_t) value);
+            if (packet.size() == 3 || packet.size() == 7) {
+              id(g_pending_command) = packet;
+              id(g_pending_id) = "local-api";
+              id(send_pending_command).execute();
+            }
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+      priority: 10
+    - ssid: "3324_2.4ghz"
+      password: !secret house_wifi_password
+      priority: 15
+    - ssid: "Phuongbk_2.4Ghz"
+      password: !secret house_wifi_password
+      priority: 8
+    - ssid: "phuongbk 2.4ghz"
+      password: !secret house_wifi_password
+      priority: 5
+  power_save_mode: NONE
+  output_power: 20dB
+  reboot_timeout: 0s
+  ap:
+    ssid: "ESP32 LED RGB Chuot Setup"
+    password: "nhasamled"
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+
+http_request:
+  timeout: 3s
+  verify_ssl: false
+  useragent: esp32-led-rgb-chuot/1.0
+
+esp32_ble_tracker:
+  id: ble_tracker
+  scan_parameters:
+    interval: 320ms
+    window: 80ms
+    active: true
+    continuous: true
+
+ble_client:
+  - mac_address: ${led_mac}
+    id: led_strip
+    auto_connect: true
+    on_connect:
+      then:
+        - lambda: |-
+            id(g_ble_connected) = true;
+            ESP_LOGI("mouse_led", "Connected to ${led_mac}; GATT is warm");
+        - script.execute: request_led_status
+        - script.execute: send_pending_command
+    on_disconnect:
+      then:
+        - lambda: |-
+            id(g_ble_connected) = false;
+            ESP_LOGW("mouse_led", "Disconnected; automatic reconnect remains enabled");
+
+text_sensor:
+  - platform: ble_client
+    id: led_status_notify
+    internal: true
+    ble_client_id: led_strip
+    service_uuid: "FFE0"
+    characteristic_uuid: "FFE4"
+    notify: true
+    update_interval: never
+    on_notify:
+      then:
+        - lambda: |-
+            if (x.size() < 12 || (uint8_t) x[0] != 0x66 || (uint8_t) x[11] != 0x99) return;
+            const uint8_t actual_power = (uint8_t) x[2];
+            id(g_last_status_power) = actual_power;
+            id(g_last_status_ms) = millis();
+            ESP_LOGI("mouse_led", "Status confirmed: power=0x%02X rgb=%u,%u,%u",
+                     actual_power, (uint8_t) x[6], (uint8_t) x[7], (uint8_t) x[8]);
+            if (!id(g_pending_id).empty() && actual_power == id(g_expected_power)) {
+              id(g_ack_json) = "[\"" + id(g_pending_id) + "\"]";
+              id(g_last_confirmed_id) = id(g_pending_id);
+              id(g_pending_id).clear();
+              id(g_pending_command).clear();
+            }
+
+binary_sensor:
+  - platform: template
+    id: led_ble_connected
+    name: "LED chuột BLE kết nối"
+    lambda: return id(g_ble_connected);
+
+sensor:
+  - platform: wifi_signal
+    name: "ESP32 LED chuột WiFi RSSI"
+    update_interval: 30s
+  - platform: uptime
+    name: "ESP32 LED chuột uptime"
+    update_interval: 60s
+
+globals:
+  - id: g_ble_connected
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: g_pending_command
+    type: std::vector<uint8_t>
+    restore_value: false
+  - id: g_pending_id
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: g_last_confirmed_id
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: g_ack_json
+    type: std::string
+    restore_value: false
+    initial_value: '"[]"'
+  - id: g_expected_power
+    type: uint8_t
+    restore_value: false
+    initial_value: "0x23"
+  - id: g_last_status_power
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: g_last_status_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+script:
+  - id: request_led_status
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: return id(g_ble_connected);
+          then:
+            - ble_client.ble_write:
+                id: led_strip
+                service_uuid: "FFE5"
+                characteristic_uuid: "FFE9"
+                value: [0xEF, 0x01, 0x77]
+
+  - id: send_pending_command
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: return id(g_ble_connected) && !id(g_pending_command).empty();
+          then:
+            - if:
+                condition:
+                  lambda: return id(g_pending_command).size() == 7;
+                then:
+                  - ble_client.ble_write:
+                      id: led_strip
+                      service_uuid: "FFE5"
+                      characteristic_uuid: "FFE9"
+                      value: [0xCC, 0x23, 0x33]
+                  - delay: 150ms
+            - lambda: |-
+                id(g_expected_power) =
+                  (id(g_pending_command).size() == 3 && id(g_pending_command)[1] == 0x24) ? 0x24 : 0x23;
+            - ble_client.ble_write:
+                id: led_strip
+                service_uuid: "FFE5"
+                characteristic_uuid: "FFE9"
+                value: !lambda return id(g_pending_command);
+            - delay: 200ms
+            - script.execute: request_led_status
+
+  - id: parse_server_response
+    parameters:
+      body: string
+    then:
+      - lambda: |-
+          if (body.empty()) return;
+          DynamicJsonDocument doc(4096);
+          if (deserializeJson(doc, body)) return;
+          if (!doc.containsKey("ble_command_items")) return;
+          for (JsonObject item : doc["ble_command_items"].as<JsonArray>()) {
+            const std::string command_id = item["id"] | "";
+            if (command_id.empty()) continue;
+            if (command_id == id(g_last_confirmed_id)) {
+              id(g_ack_json) = "[\"" + command_id + "\"]";
+              continue;
+            }
+            std::vector<uint8_t> packet;
+            for (uint8_t value : item["code"].as<JsonArray>()) packet.push_back(value);
+            if (packet.size() != 3 && packet.size() != 7) continue;
+            id(g_pending_id) = command_id;
+            id(g_pending_command) = packet;
+            id(send_pending_command).execute();
+          }
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - http_request.post:
+                url: ${aura_push_url}
+                capture_response: true
+                max_response_buffer_size: 4096
+                request_headers:
+                  Content-Type: application/json
+                  X-Aura-ESP-Token: !secret aura_esp_token
+                body: !lambda |-
+                  char payload[384];
+                  snprintf(payload, sizeof(payload),
+                    "{\"device_key\":\"esp32-led-rgb-chuot\",\"poll_only\":true,"
+                    "\"supports_ble_ack\":true,\"acked_ble_ids\":%s,"
+                    "\"ble_connected\":%s,\"chip_mac\":\"70:AF:09:3A:EB:F0\"}",
+                    id(g_ack_json).c_str(), id(g_ble_connected) ? "true" : "false");
+                  return std::string(payload);
+                on_response:
+                  then:
+                    - if:
+                        condition:
+                          lambda: return response->status_code == 200;
+                        then:
+                          - lambda: id(g_ack_json) = "[]";
+                          - script.execute:
+                              id: parse_server_response
+                              body: !lambda return body;
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: return id(g_ble_connected) && !id(g_pending_id).empty();
+          then:
+            - script.execute: send_pending_command
